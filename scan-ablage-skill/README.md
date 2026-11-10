@@ -67,6 +67,14 @@ erfasst_am;faellig;aufgabe;kategorie;mieter;betrag_eur;datei;status
 2026-11-10;;Magistrat-Zahlung 245,50 EUR in Mietsoftware verbuchen (Anna Huber);magistrat_zahlung;Anna Huber;245,50;...;offen
 ```
 
+## Mietsoftware
+
+Ist der MCP der eigenen Mietsoftware (Server 0.8) in der Session verbunden, holt der Skill die
+Mieterliste von dort und verbucht Magistrat-Zahlungen und Mietverträge nach Rückfrage direkt.
+Die CSV-Dateien werden trotzdem als Protokoll geschrieben und sind ohne MCP der Import-Weg.
+
+Auf macOS liegt Dropbox unter `~/Library/CloudStorage/Dropbox/`; dort statt `~/Dropbox/` verwenden.
+
 ## Configuration
 
 Ablauf und Ordnerkonvention stehen in `SKILL.md`. Mieterliste: `mieter.example.csv`.
