@@ -1,14 +1,14 @@
 # Scan-Ablage Skill
 
-Holt den neuesten Scan aus `Dropbox/Scan`, macht OCR (Deutsch+Englisch), zerlegt ihn in die
+Holt den neuesten Scan aus `Dropbox/_SCAN`, macht OCR (Deutsch+Englisch), zerlegt ihn in die
 einzelnen Dokumente, legt jedes als durchsuchbares PDF mit sprechendem Namen ab und wertet den
 Inhalt aus: Magistrat-Zahlungen, Mietverträge und Mietername. Ergebnis landet in einer
 Import-CSV für die Mietsoftware und in einer Aufgabenliste für die persönliche Assistenz.
 
 ## Features
 
-- Neuesten Scan finden (`latest`)
-- OCR mit `ocrmypdf` / `tesseract` (`ocr`)
+- Neuesten Scan finden, auch fertige `*.pdf.part` vom Scanner (`latest`)
+- OCR mit `ocrmypdf` / `tesseract`, standardmäßig neu erkannt (`--force-ocr`) (`ocr`)
 - Text pro Seite und Vorschlag für Dokumentgrenzen (`pages`)
 - Zerlegen nach Plan in Zielordner, ohne zu überschreiben (`split`)
 - Kerndaten auslesen und Mieter aus `mieter.csv` zuordnen (`extract`)
@@ -31,8 +31,8 @@ Manuell:
 
 ```bash
 S=~/.claude/skills/scan-ablage-skill/scripts/scan_ablage.py
-python3 $S latest ~/Dropbox/Scan
-python3 $S ocr ~/Dropbox/Scan/Scan_2026-11-10.pdf /tmp/scan/ocr.pdf
+python3 $S latest ~/Dropbox/_SCAN
+python3 $S ocr ~/Dropbox/_SCAN/Scan_2026-11-10.pdf /tmp/scan/ocr.pdf
 python3 $S pages /tmp/scan/ocr.pdf          # -> suggested_documents: [[1], [2, 3], [4]]
 python3 $S split /tmp/scan/ocr.pdf plan.json ~/Dropbox/Ablage
 python3 $S extract ~/Dropbox/Ablage/Mieter/Huber_Anna/Magistrat/2026-11-03_Magistrat-Wien-MA40_Mietbeihilfe-Huber.pdf \
@@ -69,9 +69,12 @@ erfasst_am;faellig;aufgabe;kategorie;mieter;betrag_eur;datei;status
 
 ## Mietsoftware
 
-Ist der MCP der eigenen Mietsoftware (Server 0.8) in der Session verbunden, holt der Skill die
-Mieterliste von dort und verbucht Magistrat-Zahlungen und Mietverträge nach Rückfrage direkt.
-Die CSV-Dateien werden trotzdem als Protokoll geschrieben und sind ohne MCP der Import-Weg.
+Die eigene Mietsoftware läuft auf dem Server 0.8. Ihr MCP `vermietung-mcp` (Port 8767) kann nur
+Bankeingänge eintragen (`submit_bank_eingang`); der Skill nutzt ihn nach Rückfrage dafür.
+Mieter- und Vertragsänderungen gehen nur über die Web-Routen der App und landen sonst als Aufgabe
+in `assistenz_aufgaben.csv`. Die CSV-Dateien werden immer als Protokoll geschrieben.
+
+Auf dem Mac `/usr/bin/python3` verwenden, falls Homebrew-`python3` kein `pypdf` hat.
 
 Auf macOS liegt Dropbox unter `~/Library/CloudStorage/Dropbox/`; dort statt `~/Dropbox/` verwenden.
 

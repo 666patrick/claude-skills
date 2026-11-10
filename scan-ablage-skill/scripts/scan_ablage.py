@@ -26,6 +26,16 @@ import sys
 from pathlib import Path
 
 SCAN_EXT = {".pdf", ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".heic"}
+SKIP_DIRS = {"_verarbeitet"}
+
+
+def require_pypdf() -> None:
+    try:
+        import pypdf  # noqa: F401
+    except ImportError:
+        out({"error": f"pypdf fehlt fuer {sys.executable}. Anderen Interpreter nehmen "
+                      "(z. B. /usr/bin/python3) oder: python3 -m pip install pypdf"})
+        sys.exit(2)
 
 
 # --------------------------------------------------------------------------- helpers
@@ -36,6 +46,7 @@ def out(obj) -> None:
 
 
 def page_texts(pdf: Path) -> list[str]:
+    require_pypdf()
     from pypdf import PdfReader
 
     return [(p.extract_text() or "") for p in PdfReader(str(pdf)).pages]
@@ -57,9 +68,37 @@ def safe_filename(name: str) -> str:
 
 # --------------------------------------------------------------------------- latest
 
+def is_pdf_name(p: Path) -> bool:
+    n = p.name.lower()
+    return n.endswith(".pdf") or n.endswith(".pdf.part")
+
+
+def pdf_complete(p: Path) -> bool:
+    """Scanner schreiben teils fertige PDFs als *.pdf.part: nur nehmen, wenn %%EOF da und lesbar."""
+    try:
+        with open(p, "rb") as fh:
+            fh.seek(max(0, p.stat().st_size - 2048))
+            if b"%%EOF" not in fh.read():
+                return False
+        if shutil.which("pdfinfo"):
+            return subprocess.run(["pdfinfo", str(p)], capture_output=True).returncode == 0
+        from pypdf import PdfReader
+        return len(PdfReader(str(p)).pages) > 0
+    except Exception:
+        return False
+
+
+def is_scan(p: Path) -> bool:
+    if not p.is_file() or SKIP_DIRS & set(p.parts):
+        return False
+    if p.name.lower().endswith(".pdf.part"):
+        return pdf_complete(p)
+    return p.suffix.lower() in SCAN_EXT
+
+
 def cmd_latest(args) -> None:
     folder = Path(args.folder).expanduser()
-    files = [p for p in folder.rglob("*") if p.is_file() and p.suffix.lower() in SCAN_EXT]
+    files = [p for p in folder.rglob("*") if is_scan(p)]
     if not files:
         out({"error": f"keine Scans in {folder}"})
         sys.exit(1)
@@ -80,9 +119,12 @@ def cmd_ocr(args) -> None:
     if not shutil.which("ocrmypdf"):
         out({"error": "ocrmypdf nicht installiert (pip install ocrmypdf; apt install tesseract-ocr-deu)"})
         sys.exit(1)
-    cmd = ["ocrmypdf", "-l", args.lang, "--rotate-pages", "--deskew", "--skip-text",
+    # Standard: --force-ocr. Vorhandene Scanner-Textlayer (z. B. ExactScan) sind oft schlecht und
+    # bei verkehrt herum gescannten Seiten Muell; --keep-text behaelt sie (--skip-text).
+    text_mode = "--skip-text" if args.keep_text else "--force-ocr"
+    cmd = ["ocrmypdf", "-l", args.lang, "--rotate-pages", "--deskew", text_mode,
            "--output-type", "pdf", "--optimize", "1"]
-    if src.suffix.lower() != ".pdf":
+    if not is_pdf_name(src):
         cmd += ["--image-dpi", "300"]
     cmd += [str(src), str(dst)]
     res = subprocess.run(cmd, capture_output=True, text=True)
@@ -154,16 +196,33 @@ def cmd_pages(args) -> None:
             "reasons": reasons,
             "text": t[: args.chars],
         })
+    # Stapel kommen oft verkehrt herum (letzte Seite zuerst): absteigende "Seite n von m" erkennen
+    nums = []
+    for i, t in enumerate(texts, start=1):
+        m = re.search(r"\bSeite\s*(\d+)\s*(?:von|/)\s*\d+", t, re.I)
+        if m:
+            nums.append((i, int(m.group(1))))
+    desc = sum(1 for a, b in zip(nums, nums[1:]) if b[0] == a[0] + 1 and b[1] == a[1] - 1)
+    asc = sum(1 for a, b in zip(nums, nums[1:]) if b[0] == a[0] + 1 and b[1] == a[1] + 1)
     groups = []
     for n, s in enumerate(starts):
         end = (starts[n + 1] - 1) if n + 1 < len(starts) else len(texts)
         groups.append([p for p in range(s, end + 1) if not pages[p - 1]["blank"]])
-    out({"pdf": args.pdf, "page_count": len(texts), "suggested_documents": groups, "pages": pages})
+    out({
+        "pdf": args.pdf,
+        "page_count": len(texts),
+        "reverse_order_suspected": desc > asc,
+        "note": "Grenzvorschlag gilt fuer Vorwaertsreihenfolge. Bei verkehrt gescannten Stapeln "
+                "Grenzen selbst bestimmen und im Plan die Seiten in Lesereihenfolge angeben, z. B. [5,4,3].",
+        "suggested_documents": groups,
+        "pages": pages,
+    })
 
 
 # --------------------------------------------------------------------------- split
 
 def cmd_split(args) -> None:
+    require_pypdf()
     from pypdf import PdfReader, PdfWriter
 
     reader = PdfReader(args.pdf)
@@ -190,22 +249,28 @@ def cmd_split(args) -> None:
 
 # --------------------------------------------------------------------------- extract
 
-AMOUNT = r"(?:EUR|€)\s*([\d.]+,\d{2})|([\d.]+,\d{2})\s*(?:EUR|€)"
+# Betraege: "€ 570,00", "570,00 EUR", "€ 570,-", "€ 570,--", "EUR 1.200"
+NUM = r"\d{1,3}(?:\.\d{3})*(?:,(?:\d{2}|-{1,2}))?|\d+(?:,(?:\d{2}|-{1,2}))?"
+AMOUNT = rf"(?:EUR|€)\s*({NUM})|({NUM})\s*(?:EUR|€)"
 DATE = r"\b(\d{1,2})\.\s?(\d{1,2})\.\s?(\d{4})\b"
 IBAN = r"\b([A-Z]{2}\d{2}(?:\s?[A-Z0-9]{4}){3,7}(?:\s?[A-Z0-9]{1,4})?)\b"
 GZ = r"(?:Gesch(?:ae|ä)ftszahl|GZ|Aktenzahl|Zahl|Aktenzeichen)[:\s]+([A-Z0-9][\w./\-]{3,40})"
 MA = r"\b(MA\s?\d{1,2}[A-Z]?)\b"
+TENANT_STOP = {"der", "die", "das", "den", "dem", "mieter", "mieterin", "vermieter", "vermieterin",
+               "folgenden", "nachstehend", "partei", "parteien", "unterschrift", "name"}
 TENANT_PATTERNS = [
-    r"Mieter(?:in)?\s*[:\-]\s*(?:Herr|Frau)?\s*([A-ZÄÖÜ][\w\-]+(?:\s+[A-ZÄÖÜ][\w\-]+){1,3})",
-    r"und\s+(?:Herrn?|Frau)\s+([A-ZÄÖÜ][\w\-]+(?:\s+[A-ZÄÖÜ][\w\-]+){1,3})\s*(?:,|\(|als|wohnhaft|geb)",
-    r"(?:Herrn?|Frau)\s+([A-ZÄÖÜ][\w\-]+(?:\s+[A-ZÄÖÜ][\w\-]+){1,3})\s*\(?\s*(?:im Folgenden|nachstehend)?\s*[„\"]?Mieter",
+    r"Mieter(?:in)?\s*[:\-]\s*(?:Herr|Frau)?\s*([A-ZÄÖÜ][\w\-]+(?:[ \t]+[A-ZÄÖÜ][\w\-]+){1,3})",
+    r"und\s+(?:Herrn?|Frau)\s+([A-ZÄÖÜ][\w\-]+(?:[ \t]+[A-ZÄÖÜ][\w\-]+){1,3})\s*(?:,|\(|als|wohnhaft|geb)",
+    r"(?:Herrn?|Frau)\s+([A-ZÄÖÜ][\w\-]+(?:[ \t]+[A-ZÄÖÜ][\w\-]+){1,3})\s*\(?\s*(?:im Folgenden|nachstehend)?\s*[„\"]?Mieter",
 ]
 OBJECT = r"(?:Mietgegenstand|Objekt|Wohnung|Top)\s*[:\-]?\s*([^\n]{5,80})"
-RENT = r"(?:Hauptmietzins|Miete|Mietzins|Gesamtmiete)[^\d\n]{0,40}((?:EUR|€)\s*[\d.]+,\d{2}|[\d.]+,\d{2}\s*(?:EUR|€))"
+RENT = rf"(?:Hauptmietzins|Miete|Mietzins|Gesamtmiete)[^\d\n]{{0,40}}((?:EUR|€)\s*(?:{NUM})|(?:{NUM})\s*(?:EUR|€))"
 
 
 def to_float(s: str) -> float:
-    return float(s.replace(".", "").replace(",", "."))
+    s = re.sub(r"[^\d.,-]", "", s)
+    s = re.sub(r",-+$", "", s).replace(".", "").replace(",", ".")
+    return float(s)
 
 
 def find_dates(text: str) -> list[str]:
@@ -234,8 +299,14 @@ def classify(text: str) -> str:
     t = text.lower()
     if "mietvertrag" in t:
         return "mietvertrag"
-    if "magistrat" in t or re.search(MA, text):
-        if re.search(r"zahlung|überweis|ueberweis|auszahl|gutschrift|betrag|bescheid", t):
+    if re.search(r"versicherung|polizze|police\b|prämie|praemie", t):
+        return "versicherung"
+    # Statutarstaedte (Wien, Linz, Wels, Steyr ...) treten als "Stadt X" / "Magistrat der Stadt X" auf
+    behoerde = ("magistrat" in t or re.search(MA, text)
+                or re.search(r"\bStadt\s+[A-ZÄÖÜ][a-zäöüß]+", text)
+                or re.search(r"steuerverwaltung|stadtkasse|abgabenverwaltung", t))
+    if behoerde:
+        if re.search(r"zahlung|überweis|ueberweis|auszahl|gutschrift|betrag|bescheid|vorschreibung|abgabe|fällig|faellig", t):
             return "magistrat_zahlung"
         return "magistrat_sonstiges"
     if "rechnung" in t:
@@ -289,6 +360,8 @@ def extract(text: str, tenants: list[dict]) -> dict:
     for pat in TENANT_PATTERNS:
         for m in re.findall(pat, text):
             name = re.sub(r"\s+", " ", m).strip()
+            if any(w.lower() in TENANT_STOP for w in name.split()):
+                continue
             if name not in tenant_candidates:
                 tenant_candidates.append(name)
     rent = re.search(RENT, text, re.I)
@@ -378,6 +451,7 @@ def cmd_log(args) -> None:
             "magistrat_sonstiges": "Schreiben vom Magistrat pruefen",
             "kuendigung": f"Kuendigung {mieter or ''} bearbeiten",
             "rechnung": f"Rechnung {eur(d.get('max_amount_eur'))} EUR pruefen/bezahlen",
+            "versicherung": f"Versicherungsschreiben pruefen ({eur(d.get('max_amount_eur'))} EUR)",
         }.get(cat)
         if task:
             append_csv(logdir / "assistenz_aufgaben.csv", TASK_FIELDS, {
@@ -402,7 +476,9 @@ def main() -> None:
 
     p = sub.add_parser("latest"); p.add_argument("folder"); p.set_defaults(fn=cmd_latest)
     p = sub.add_parser("ocr"); p.add_argument("input"); p.add_argument("output")
-    p.add_argument("--lang", default="deu+eng"); p.set_defaults(fn=cmd_ocr)
+    p.add_argument("--lang", default="deu+eng")
+    p.add_argument("--keep-text", action="store_true", help="vorhandenen Textlayer behalten (--skip-text)")
+    p.set_defaults(fn=cmd_ocr)
     p = sub.add_parser("pages"); p.add_argument("pdf"); p.add_argument("--chars", type=int, default=1200)
     p.set_defaults(fn=cmd_pages)
     p = sub.add_parser("split"); p.add_argument("pdf"); p.add_argument("plan"); p.add_argument("target")
