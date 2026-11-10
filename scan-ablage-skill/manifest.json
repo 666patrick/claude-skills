@@ -1,0 +1,7 @@
+{
+  "name": "scan-ablage-skill",
+  "version": "1.0.0",
+  "description": "Dropbox scan OCR, splitting, filing and rental data extraction skill",
+  "author": "Patrick",
+  "commands": []
+}
